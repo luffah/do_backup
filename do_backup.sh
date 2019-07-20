@@ -623,10 +623,10 @@ _read_cfg(){
         CONFIGDIR="$(dirname $CONFIG)"
         (
         cd ${CONFIGDIR};
-        INCLUDED_FILE="$(echo "$l" | awk '{print $2}')";
-        for l in $(eval "ls -1 ${INCLUDED_FILE}" 2> /dev/null); do
-          PARENT_CONFIG="$CONFIG" CONFIG="$INCLUDED_FILE" \
-            _read_cfg $INCLUDED_FILE
+        INCLUDED_FILE="$(echo "$l" | sed 's/Include //')";
+        for f in $(eval "echo ${INCLUDED_FILE}" 2> /dev/null); do
+          [ -f "${f}" ] && PARENT_CONFIG="$CONFIG" CONFIG="$f" \
+            _read_cfg $f
         done
         )
         ;;
