@@ -9,11 +9,14 @@ _force=
 _yes=
 
 HOSTNAME=$(hostname)
+CONFIG_FILE=
+
 usage () {
     cat <<EOUSE
-Config files (ordered by priority):
-  ~/.do_backup.cfg
-  ~/.config/do_backup/directories.${HOSTNAME}
+Config files (load only one ordered by priority):
+  \${CONFIG_PATH}/directories.\${HOSTNAME}
+  \${CONFIG_PATH}/directories
+  ~/.config/do_backup/directories.\${HOSTNAME}
   ~/.config/do_backup/directories
 
 Config file format:
@@ -48,7 +51,8 @@ Description:
 Usage: $(basename $0) [-t /remote/dir] [TAG*] OPTIONS
 
 Options:
-    -t REMOTE_DIR     -- A directory containing the .backup dir
+    -t REMOTE_DIR     -- The backup dir (default: <chosen disk>/.backup)
+    -c CONFIG_FILE    -- A custom config file
     --dry-run         -- Dry run : no effect
     --yes             -- Don't ask questions
 
@@ -64,6 +68,8 @@ Related to [link] sections:
     -rl|--relink     -- Import links (no sync)
 EOUSE
 }
+
+# PARSING OPTIONS
 _all_opts="$@"
 while [ -n "$1" ]
 do
@@ -97,13 +103,17 @@ do
       TARGET="${2}"
       shift
       ;;
+    -c)
+      CONFIG_FILE="${2}"
+      shift
+      ;;
     --dry-run)
       _dry_run=t
       ;;
     -y*|--yes)
       _yes=t
       ;;
-    -h)
+    -h|--help)
       usage
       exit 0
       ;;
@@ -120,25 +130,30 @@ do
   esac
   shift
 done
-if [ -z "$CONFIG" ]; then
-  [ ! -f "${CONFIG}" ] && CONFIG="${HOME}/.do_backup.cfg"
-  [ ! -f "${CONFIG}" ] && CONFIG="${HOME}/.config/do_backup/directories.${HOSTNAME}"
-  [ ! -f "${CONFIG}" ] && CONFIG="${CONFIG_PATH}/directories.${HOSTNAME}"
-  [ ! -f "${CONFIG}" ] && CONFIG="${HOME}/.config/do_backup/directories"
-  [ ! -f "${CONFIG}" ] && CONFIG="${CONFIG_PATH}/directories"
-fi
-[ ! -f "${CONFIG}" ] && echo "Configuration file is required." && exit 1
+
+# Fetch config
+for _dir in ${CONFIG_PATH} ${HOME}/.config/do_backup; do
+   for _f in /directories; do
+     for _variant in ".${HOSTNAME}" ""; do
+      if [ -f "${_dir}${_f}${_variant}" ]; then
+        CONFIG_FILE="${_dir}${_f}${_variant}"
+        break
+      fi
+    done
+  done
+done
+[ ! -f "${CONFIG_FILE}" ] && echo "Configuration file is required." && exit 1
 
 if [ "$_rsync" ]; then
 
   if [ "`whoami`" != "root" ]; then
+    [ "${TARGET}" ] && mkdir ${TARGET} > /dev/null
     if [ -z "${TARGET}" -o ! -d "${TARGET}" ]; then
        echo "(superuser access is needed to launch this script)" 
        sudo \
          TARGET=${TARGET} \
          HOME=${HOME} \
-         CONFIG="${CONFIG}" \
-         sh -- $0 $_all_opts
+         sh -- $0 $_all_opts -c "${CONFIG_FILE}"
        exit $?
     fi
   fi
@@ -147,20 +162,20 @@ if [ "$_rsync" ]; then
 
   if [ -z "${TARGET:-}" ]
   then
-
-    for i in /dev/sd[bcd][1234]
+    _devlist=
+    for i in /dev/sd[bcdefg][123456]
     do
+      test -e $i || continue
       if udisksctl info -b $i | grep crypto_ > /dev/null
       then
-        LUKSDEV="$i"
-        # LUKSUUID=$(udisksctl info -b $i | awk '/IdUUID:/ {print $2}')
-        break
+        _devlist="$_devlist $i $(udisksctl info -b $i | awk '/Symlinks:/ {print $2}')"
       fi
     done
-
-    echo "Using first crypto device found : ${LUKSDEV}"
+    LUKSDEV="$(whiptail --menu "Device ?" 0 0 0 ${_devlist} 3>&1 1>&2 2>&3)"
 
     if [ -z "$LUKSDEV" ]; then echo "No luks dev found"; exit 1; fi
+    echo "Using crypto device : ${LUKSDEV}"
+
 
     DEV=$(udisksctl unlock -b $LUKSDEV 2>&1 | sed -n 's|.*as [^/]*\(/[-a-zA-Z0-9/]\+\)[^-a-zA-Z0-9/]*.*|\1|p')
     TARGET=$(udisksctl mount -b $DEV 2>&1 | sed -n 's|.* at [^/]*\(/[-a-zA-Z0-9/]\+\)[^-a-zA-Z0-9/]*.*|\1|p')
@@ -396,6 +411,11 @@ rsync_touch(){
           while read i
           do
             echo "#- $i"
+            case "$i" in
+              "Only"*)  # diff message "Only in "
+                continue
+                ;;
+            esac
             tmp="`echo \"$i\" | sed 's/Files \([^ ]*\) and \([^ ]*\) differ/\1\|\2/'`"
             tmpa="`echo $tmp | cut -d '|' -f1`"
             tmpb="`echo $tmp | cut -d '|' -f2`"
@@ -450,6 +470,14 @@ rsync_touch(){
     fi
   else
     echo "#! Inconsistancy detected : skip"
+  fi
+  if [ -f "${_from}/.backup_touch" ]; then
+    _uid_from=$(stat -c "%U" ${_from})
+    chown ${_uid_from} "${_from}/.backup_touch"
+  fi
+  if [ -f "${_to}/.backup_touch" ]; then
+    _uid_to=$(stat -c "%U" ${_to})
+    chown ${_uid_to} "${_to}/.backup_touch"
   fi
 }
 
@@ -610,6 +638,7 @@ _process_line(){
 }
 
 _read_cfg(){
+    echo "… using config $1\n"
     i=0
     _maxlen=$(wc -l ${1} | awk '{print $1}')
     while [ $i -lt $_maxlen ]; do
@@ -620,12 +649,12 @@ _read_cfg(){
         continue
         ;;
       "Include "*)
-        CONFIGDIR="$(dirname $CONFIG)"
+        CONFIGDIR="$(dirname $CONFIG_FILE)"
         (
         cd ${CONFIGDIR};
         INCLUDED_FILE="$(echo "$l" | sed 's/Include //')";
-        for f in $(eval "echo ${INCLUDED_FILE}" 2> /dev/null); do
-          [ -f "${f}" ] && PARENT_CONFIG="$CONFIG" CONFIG="$f" \
+        for f in $(eval "find ${INCLUDED_FILE}" 2> /dev/null); do
+          [ -f "${f}" ] && PARENT_CONFIG="$CONFIG_FILE" CONFIG_FILE="$f" \
             _read_cfg $f
         done
         )
@@ -679,7 +708,6 @@ echo
 [ "${_tags}" ]  && echo "TAGS        : ${_tags}"
 [ "${TARGET}" ] && echo "TARGET      : ${TARGET}"
 echo '--------------------------'
-_read_cfg ${CONFIG}
+_read_cfg ${CONFIG_FILE}
 echo "########## DONE ##########"
 exit 0
-
