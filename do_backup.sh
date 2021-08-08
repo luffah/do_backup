@@ -7,10 +7,15 @@ _archive=t
 _dry_run=
 _force=
 _yes=
+_merge_a=
+_merge_b=
 
 HOSTNAME=$(hostname)
 CONFIG_FILE=
-
+DIFF_EXCLUDES="*.pyc,__pycache__,${DIFF_EXCLUDES}"
+_diff_rq(){
+  diff $(echo "${DIFF_EXCLUDES}" | sed 's/,$//;s/\(^\|,\)/ -x /g') -rq "${1}" "${2}"
+}
 usage () {
     cat <<EOUSE
 Config files (load only one ordered by priority):
@@ -48,7 +53,7 @@ Description:
   If no TARGET (remote) directory is specified,
   then the first encrypted USB key found is used.
 
-Usage: $(basename $0) [-t /remote/dir] [TAG*] OPTIONS
+Usage: $(basename $0) [TAG*] OPTIONS
 
 Options:
     -t REMOTE_DIR     -- The backup dir (default: <chosen disk>/.backup)
@@ -56,16 +61,20 @@ Options:
     --dry-run         -- Dry run : no effect
     --yes             -- Don't ask questions
 
-Related to [rsync] sections:
+  related to [rsync] sections:
     -b|-backup        -- Backup  (local  -> remote)
     -r|-restore       -- Restore (remote -> local )
 
-Related to [archive] sections:
+  related to [archive] sections:
     -a|--archive      -- Perform archiving part (no sync)
     -noa|--no-archive -- Disable archiving
 
-Related to [link] sections:
+  related to [link] sections:
     -rl|--relink     -- Import links (no sync)
+
+For cases you'll need to merge file by file, use (currently use meld):
+  -m|--merge FOLDER_A FOLDER_B
+
 EOUSE
 }
 
@@ -83,6 +92,11 @@ do
       _sens='restore'
       _relink=t
       _archive=
+      ;;
+    -m|--merge)
+      _merge_a="$2"
+      _merge_b="$3"
+      shift 2
       ;;
     -f|--force)
       _force=t
@@ -121,9 +135,6 @@ do
       echo "Unknown option : $1"
       exit 1
       ;;
-    /*)
-      TARGET="${1}"
-      ;;
     *)
       _tags="${_tags} ${1}"
       ;;
@@ -144,22 +155,32 @@ for _dir in ${CONFIG_PATH} ${HOME}/.config/do_backup; do
 done
 [ ! -f "${CONFIG_FILE}" ] && echo "Configuration file is required." && exit 1
 
-if [ "$_rsync" ]; then
+_ensure_dir_access(){
+  [ ! -d "${1}" ]  && "ERROR: Can't acces to $1." && exit 2
+}
 
+_ensure_permissions(){
   if [ "`whoami`" != "root" ]; then
-    [ "${TARGET}" ] && mkdir ${TARGET} > /dev/null
-    if [ -z "${TARGET}" -o ! -d "${TARGET}" ]; then
-       echo "(superuser access is needed to launch this script)" 
-       sudo \
-         TARGET=${TARGET} \
-         HOME=${HOME} \
-         sh -- $0 $_all_opts -c "${CONFIG_FILE}"
-       exit $?
+    if [ "${_merge_a}" ]; then
+      TARGET="${_merge_a}"
+      _ensure_dir_access "${_merge_a}" 
+      _ensure_dir_access "${_merge_b}" 
+    else
+      [ "${TARGET}" ] && mkdir ${TARGET} > /dev/null
+      if [ -z "${TARGET}" -o ! -d "${TARGET}" ]; then
+         echo "(superuser access is needed to launch this script)" 
+         sudo \
+           TARGET=${TARGET} \
+           HOME=${HOME} \
+           sh -- $0 $_all_opts -c "${CONFIG_FILE}"
+         exit $?
+      fi
     fi
   fi
 
-  echo "(ok, let's go)"
+}
 
+_ensure_target(){
   if [ -z "${TARGET:-}" ]
   then
     _devlist=
@@ -198,7 +219,9 @@ if [ "$_rsync" ]; then
   fi
   mkdir -p $TARGET
   export TARGET
+}
 
+_confirm_sens(){
   if [ -n "${_sens}" ]
   then
     case ${_sens} in
@@ -221,8 +244,7 @@ if [ "$_rsync" ]; then
     fi
     fi
   fi
-
-fi
+}
 
 _run(){
   if [ "${_dry_run}" ]; then
@@ -399,7 +421,7 @@ rsync_touch(){
         if [ "${rep}" = "d" ]
         then
           tmpfile="`mktemp`"
-          LANG='EN' diff -rq ${_from} ${_to} > ${tmpfile}
+          LANG='EN' _diff_rq ${_from} ${_to} > ${tmpfile}
           if [ $? -eq 0 ]
           then
             echo "Skip because source and target equal."
@@ -696,6 +718,13 @@ _read_cfg(){
   done
 }
 
+if [ "$_rsync" ]; then
+  _ensure_permissions
+  echo "(ok, let's go)"
+  _ensure_target
+  _confirm_sens
+fi
+
 export BACKUP_DATE=`date '+%Y%m%d_%H%M%S'`
 echo '--------------------------'
 printf "OPERATIONS  : "
@@ -708,6 +737,13 @@ echo
 [ "${_tags}" ]  && echo "TAGS        : ${_tags}"
 [ "${TARGET}" ] && echo "TARGET      : ${TARGET}"
 echo '--------------------------'
-_read_cfg ${CONFIG_FILE}
+if [ "$_merge_a" ]; then
+  echo "MERGING ${_merge_a} with ${_merge_b}"
+  _run meld "${_merge_a}" "${_merge_b}"
+  _diff_rq "${_merge_a}" "${_merge_b}" || echo "##~~~ MERGE is incomplete"
+else
+  _read_cfg ${CONFIG_FILE}
+fi
+
 echo "########## DONE ##########"
 exit 0
