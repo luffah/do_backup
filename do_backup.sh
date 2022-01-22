@@ -166,8 +166,8 @@ _ensure_permissions(){
       _ensure_dir_access "${_merge_a}" 
       _ensure_dir_access "${_merge_b}" 
     else
-      [ "${TARGET}" ] && mkdir ${TARGET} > /dev/null
-      if [ -z "${TARGET}" -o ! -d "${TARGET}" ]; then
+      [ "${TARGET}" ] && mkdir -p ${TARGET} > /dev/null
+      if [ -z "${TARGET}" -o ! -d "${TARGET}" -o ! -w "${TARGET}" ]; then
          echo "(superuser access is needed to launch this script)" 
          sudo \
            TARGET=${TARGET} \
