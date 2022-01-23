@@ -9,6 +9,7 @@ _force=
 _yes=
 _merge_a=
 _merge_b=
+_use_meld="$(meld --version 2> /dev/null)"
 
 HOSTNAME=$(hostname)
 CONFIG_FILE=
@@ -155,6 +156,54 @@ for _dir in ${CONFIG_PATH} ${HOME}/.config/do_backup; do
 done
 [ ! -f "${CONFIG_FILE}" ] && echo "Configuration file is required." && exit 1
 
+_ask_yes_no_extended(){
+  local title="$1"
+  local choices descs i add_choice desc
+
+  case "${_default_rep:-y}" in
+    y)
+      choices="Y/n"
+      descs="Yes by default; no to skip;"
+    ;;
+    n)
+      choices="y/N"
+      descs="yes to confirm; No by default;"
+    ;;
+    *)
+      choices="y/n"
+      descs="yes to confirm; no to skip;"
+    ;;
+  esac
+  shift
+  for i in $*; do
+    add_choice=true
+    desc=
+    case $i in
+      d)
+        desc="to diff"
+        ;;
+      r)
+        desc="to switch source and target"
+        ;;
+      m)
+        desc="to use meld"
+        [ -z "${_use_meld}" ] && add_choice=false
+        ;;
+    esac
+    if ${add_choice}; then
+      if [ "${desc}" ]; then
+        descs="${descs}$i "
+        [ "${_default_rep}" = "$i" ] && descs="${descs}-by default- "
+        descs="${descs}${desc}"
+        descs="${descs};"
+      fi
+      [ "${_default_rep}" = "$i" ] && i=$(echo $i | tr [:lower:] [:upper:])
+      choices="${choices}/$i"
+    fi
+  done
+  echo "> ${title} [${choices}] ? (${descs})"
+}
+
 _ensure_dir_access(){
   [ ! -d "${1}" ]  && "ERROR: Can't acces to $1." && exit 2
 }
@@ -181,6 +230,7 @@ _ensure_permissions(){
 }
 
 _ensure_target(){
+  local i _devlist _dev _luksdev
   if [ -z "${TARGET:-}" ]
   then
     _devlist=
@@ -192,24 +242,24 @@ _ensure_target(){
         _devlist="$_devlist $i $(udisksctl info -b $i | awk '/Symlinks:/ {print $2}')"
       fi
     done
-    LUKSDEV="$(whiptail --menu "Device ?" 0 0 0 ${_devlist} 3>&1 1>&2 2>&3)"
+    _lucksdev="$(whiptail --menu "Device ?" 0 0 0 ${_devlist} 3>&1 1>&2 2>&3)"
 
-    if [ -z "$LUKSDEV" ]; then echo "No luks dev found"; exit 1; fi
-    echo "Using crypto device : ${LUKSDEV}"
+    if [ -z "$_lucksdev" ]; then echo "No luks dev found"; exit 1; fi
+    echo "Using crypto device : ${_lucksdev}"
 
 
-    DEV=$(udisksctl unlock -b $LUKSDEV 2>&1 | sed -n 's|.*as [^/]*\(/[-a-zA-Z0-9/]\+\)[^-a-zA-Z0-9/]*.*|\1|p')
-    TARGET=$(udisksctl mount -b $DEV 2>&1 | sed -n 's|.* at [^/]*\(/[-a-zA-Z0-9/]\+\)[^-a-zA-Z0-9/]*.*|\1|p')
+    _dev=$(udisksctl unlock -b $_lucksdev 2>&1 | sed -n 's|.*as [^/]*\(/[-a-zA-Z0-9/]\+\)[^-a-zA-Z0-9/]*.*|\1|p')
+    TARGET=$(udisksctl mount -b $_dev 2>&1 | sed -n 's|.* at [^/]*\(/[-a-zA-Z0-9/]\+\)[^-a-zA-Z0-9/]*.*|\1|p')
 
-    echo "${LUKSDEV} -> ${DEV} -> ${TARGET}"
+    echo "${_lucksdev} -> ${_dev} -> ${TARGET}"
 
     umount_dev(){
-      udisksctl unmount -b ${DEV}
-      echo "eject device ? [Y/n]"
+      udisksctl unmount -b ${_dev}
+      _ask_yes_no_extended "eject device"
       read ret
       if [ "${ret}" != "n" ]; then
-        udisksctl lock -b ${LUKSDEV}
-        udisksctl power-off -b ${LUKSDEV}
+        udisksctl lock -b ${_lucksdev}
+        udisksctl power-off -b ${_lucksdev}
       fi
       exit 1
     }
@@ -255,6 +305,7 @@ _run(){
 }
 
 check_filesystems(){
+  local _fs_local _fs_remote
   [ -d "$1" ] && _d_local="$1" || _d_local="`dirname $1`"
   [ -d "$2" ] && _d_remote="$2" || _d_remote="`dirname $2`"
   _fs_local="`stat -f -c %T ${_d_local} | sed 's|ext.*|ext|;s|msdos.*|msdos|'`"
@@ -277,6 +328,7 @@ check_filesystems(){
 }
 
 check_consistancy(){
+  local ret _dates_a _dates_b _cur_a _cur_b _missing_a _missing_a
   if [ ! -f "${2}" ]
   then
     # either f1 exist or not
@@ -328,7 +380,7 @@ check_consistancy(){
     echo "#! Inconsistancy detected .. you can try to repair it manually"
     sleep 1
     vimdiff ${1} ${2}
-    echo "> Retry [Y/n] ?"
+    _ask_yes_no_extended "Retry"
     rep=""; read rep; if [ -z "${rep}" -o "${rep}" = "yes" ]
     then
       check_consistancy $1 $2
@@ -339,13 +391,14 @@ check_consistancy(){
 }
 
 rsync_touch(){
-  _localdir=$1
-  _remotedir=$2
-  _reuse_touch=""
-  _noconfirm=""
-  _pass=""
+  local _localdir=$1
+  local _remotedir=$2
+  local _reuse_touch=""
+  local _noconfirm=""
+  local _pass=""
   check_consistancy "${_localdir}/.backup_touch" "${_remotedir}/.backup_touch"
-  _consistancy=$?
+  local _consistancy=$?
+  local _from _to
   if [ ${_consistancy} -lt 10  ]; then
     if [ "$(( _consistancy % 2 ))" -eq 0 ]; then
       _from="${_localdir}"
@@ -386,7 +439,7 @@ rsync_touch(){
           if [ -z "${_yes}" ]
           then
             echo "#! It look like your local version is obsolete."
-            echo "> Do you want to move it before overiding data ? [Y/n]"
+            _ask_yes_no_extended "Do you want to move it before overiding data"
             read  rep
           else
             echo "#! backuping obsolete directory"
@@ -416,7 +469,7 @@ rsync_touch(){
         then 
           echo  "Warning : backup report of the target is newer than source"
         fi
-        echo "> Rsync [Y/n/d/r] ? (Yes by default; no to skip; d to diff; r to revert)"
+        _ask_yes_no_extended "Rsync" d m r
         read  rep
         if [ "${rep}" = "d" ]
         then
@@ -457,8 +510,13 @@ rsync_touch(){
           echo "- Last modification for target/.backup_touch : `stat -c '%y' ${_to}/.backup_touch`"
           echo "# From        : ${_from}"
           echo "# To          : ${_to}"
-          echo "> Rsync [Y/n/r] ? (Yes by default; no to skip ; r to revert)"
+          _ask_yes_no_extended "Rsync" m r
           read  rep
+        fi
+        if [ "${rep}" = "m" ]
+        then
+          meld ${_from} ${_to}
+          _ask_yes_no_extended "Rsync" r
         fi
         if [ "${rep}" = "r" ]
         then
@@ -467,7 +525,7 @@ rsync_touch(){
           _to="${_tmp}"
           echo "# From        : ${_from}"
           echo "# To          : ${_to}"
-          echo "> Rsync [Y/n] ? (Yes by default; no to skip)"
+          _ask_yes_no_extended "Rsync" 
           read  rep
         fi
       fi
@@ -512,7 +570,7 @@ try_to_link(){
     if [ -e "${f_link}" -a ! -L "${f_link}" ]
     then
       echo "/ The target is a concrete file or directory and the source does not exist."
-      echo "Setup the link (move files and create the link) ? [y/N]"
+      _default_rep=n _ask_yes_no_extended "Setup the link (move files and create the link)"
       [ -z "${_yes}" ] && read rep || rep = "y"
       if [ "${rep}" = "y" ] 
       then
@@ -532,7 +590,7 @@ try_to_link(){
       echo ": (1) already exists"
 
       if [ -z "${_yes}" ]; then
-        echo "( break link with `readlink ${f_link}` )[Y/n]"
+        _ask_yes_no_extended "(break link with `readlink ${f_link}`)"
         read rep
       fi
       if [ "${rep}" = "n" ]; then
@@ -546,7 +604,7 @@ try_to_link(){
   elif [ -e "${f_link}" ]; then
     echo ": (1) is a concrete file or directory"
     if [ -n "${SHELL}" ]; then
-      echo "Do you want to resolve the conflict ? [y/N]"
+      _default_rep=n _ask_yes_no_extended "Do you want to resolve the conflict"
       [ -z "${_yes}" ] && read rep || rep = "n"
       if [ "${rep}" = "y" ] 
       then
@@ -610,6 +668,36 @@ _process_line(){
       [ -z "${_relink}" ] && return
       printf "LINK $value1 -> $value2"
       try_to_link $value1 $value2
+      ;;
+    fetch)
+      [ -z "${_rsync}" ] && return
+      [ "${_sens}" = "backup" ] && return
+      _local="$value1"
+      _remote="$TARGET/$value2"
+      if check_filesystems ${_local} ${_remote}
+      then
+        printf "\rFetch ${_remote} => ${_local}\n"
+        rep=y
+        if [ -z "${_yes}" ]
+        then
+          _ask_yes_no_extended "Fetch content and override existing"
+          read  rep
+        fi
+        if [ "${rep}" = "n" ]; then
+          echo "pass"
+        else
+          _run ${_sync_method} ${_remote}/ ${_local} 2> /dev/null
+        fi
+      fi
+      ;;
+    meld)
+      _local="$value1"
+      _remote="$TARGET/$value2"
+      if check_filesystems ${_local} ${_remote}
+      then
+        printf "\rOpenning meld on  ${_remote} <> ${_local}\n"
+        meld ${_local} ${_remote} 
+      fi
       ;;
     rsync)
       [ -z "${_rsync}" ] && return
